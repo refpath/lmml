@@ -74,6 +74,13 @@ defmodule Lmml.Bundle do
   # `.docx`/`.epub`-style "zip wearing a different extension" formats rely on.
   @zip_magic <<0x50, 0x4B, 0x03, 0x04>>
 
+  # Every archive `to_binary/2` produces carries this timestamp on every
+  # entry (the earliest instant the zip format can represent), so the same
+  # bundle always yields the same bytes and a digest over the archive is
+  # meaningful. Real modification times belong in a manifest, not in
+  # container metadata a reader cannot verify.
+  @fixed_mtime {{1980, 1, 1}, {0, 0, 0}}
+
   # ---------------------------------------------------------------------
   # Opening from disk or memory
   # ---------------------------------------------------------------------
@@ -274,8 +281,60 @@ defmodule Lmml.Bundle do
   end
 
   # ---------------------------------------------------------------------
-  # Writing to disk
+  # Serializing and writing
   # ---------------------------------------------------------------------
+
+  @doc """
+  Serializes a `:zip` bundle into the bytes of an `.lmmlz` archive,
+  without touching disk.
+
+  The output is deterministic: entries are written in byte order of their
+  names and every entry carries the same fixed timestamp, so serializing
+  the same bundle twice yields identical bytes and a digest over the
+  archive identifies its content. `name` overrides the narrative entry's
+  name (normalized like `load/3`'s); it defaults to the bundle's own.
+
+  Returns `{:error, :not_a_zip_bundle}` for a `:text` bundle -- a bare
+  narrative's bytes are simply `narrative/1`.
+  """
+  @spec to_binary(t(), String.t() | nil) :: {:ok, binary()} | {:error, term()}
+  def to_binary(bundle, name \\ nil)
+
+  def to_binary(%__MODULE__{kind: :zip, narrative: narrative, entries: entries} = bundle, name) do
+    narrative_name = narrative_name_for(name || bundle.name)
+
+    file_entries =
+      [{narrative_name, narrative} | Map.to_list(entries)]
+      |> Enum.sort_by(fn {entry_name, _data} -> entry_name end)
+      |> Enum.map(fn {entry_name, data} ->
+        {String.to_charlist(entry_name), data, fixed_file_info(byte_size(data))}
+      end)
+
+    case :zip.create(String.to_charlist(narrative_name <> "z"), file_entries, [:memory]) do
+      {:ok, {_name, binary}} -> {:ok, binary}
+      {:error, reason} -> {:error, {:zip_create_failed, reason}}
+    end
+  end
+
+  def to_binary(%__MODULE__{kind: :text}, _name), do: {:error, :not_a_zip_bundle}
+
+  defp fixed_file_info(size) do
+    file_info(
+      size: size,
+      type: :regular,
+      access: :read_write,
+      atime: @fixed_mtime,
+      mtime: @fixed_mtime,
+      ctime: @fixed_mtime,
+      mode: 0o644,
+      links: 1,
+      major_device: 0,
+      minor_device: 0,
+      inode: 0,
+      uid: 0,
+      gid: 0
+    )
+  end
 
   @doc """
   Persists a bundle to disk in its *current* form (text stays text, zip
@@ -283,26 +342,20 @@ defmodule Lmml.Bundle do
   that. For a `:zip` bundle, the internal narrative entry name is always
   freshly derived from `path`'s own basename (not from whatever name the
   bundle was constructed/opened with), so whatever you write is always
-  internally self-consistent with its own filename.
+  internally self-consistent with its own filename, and the bytes are
+  exactly what `to_binary/2` produces.
   """
   @spec write!(t(), Path.t()) :: :ok
   def write!(%__MODULE__{kind: :text, narrative: narrative}, path) do
     File.write!(path, narrative)
   end
 
-  def write!(%__MODULE__{kind: :zip, narrative: narrative, entries: entries}, path) do
-    name = path |> Path.basename() |> narrative_name_for()
-
-    file_entries =
-      [{String.to_charlist(name), narrative} | Enum.map(entries, &to_charlist_entry/1)]
-
-    case :zip.create(String.to_charlist(path), file_entries) do
-      {:ok, _} -> :ok
+  def write!(%__MODULE__{kind: :zip} = bundle, path) do
+    case to_binary(bundle, Path.basename(path)) do
+      {:ok, binary} -> File.write!(path, binary)
       {:error, reason} -> raise "Failed to write .lmmlz archive to #{path}: #{inspect(reason)}"
     end
   end
-
-  defp to_charlist_entry({entry_name, data}), do: {String.to_charlist(entry_name), data}
 
   # ---------------------------------------------------------------------
   # Uniform accessors

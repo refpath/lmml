@@ -107,7 +107,74 @@ defmodule Lmml.BundleTest do
     end
   end
 
+  describe "to_binary/2 deterministic serialization" do
+    test "serializing the same bundle twice yields identical bytes" do
+      {:ok, bundle} =
+        Bundle.new_zip("convo", "See @b.png and @a.png.", %{"b.png" => "bb", "a.png" => "aa"})
+
+      assert {:ok, first} = Bundle.to_binary(bundle)
+      assert {:ok, second} = Bundle.to_binary(bundle)
+      assert first == second
+    end
+
+    test "entry order in the archive is the byte order of names, not insertion order" do
+      {:ok, one} =
+        Bundle.new_zip("convo", "See @b.png and @a.png.", %{"b.png" => "bb", "a.png" => "aa"})
+
+      {:ok, two} =
+        Bundle.new_zip("convo", "See @b.png and @a.png.", %{"a.png" => "aa", "b.png" => "bb"})
+
+      assert Bundle.to_binary(one) == Bundle.to_binary(two)
+
+      {:ok, binary} = Bundle.to_binary(one)
+      {:ok, table} = :zip.table(binary)
+      names = for {:zip_file, name, _, _, _, _} <- table, do: to_string(name)
+      assert names == ["a.png", "b.png", "convo.lmml"]
+    end
+
+    test "every entry carries the fixed epoch timestamp rather than the wall clock" do
+      {:ok, bundle} = Bundle.new_zip("convo", "See @a.png.", %{"a.png" => "aa"})
+      {:ok, binary} = Bundle.to_binary(bundle)
+      {:ok, table} = :zip.table(binary)
+
+      for {:zip_file, _name, info, _, _, _} <- table do
+        assert elem(info, 5) == {{1980, 1, 1}, {0, 0, 0}}
+      end
+    end
+
+    test "the serialized archive loads back to an equal bundle" do
+      {:ok, bundle} = Bundle.new_zip("convo", "See @a.png.", %{"a.png" => "aa"})
+      {:ok, binary} = Bundle.to_binary(bundle)
+
+      assert {:ok, loaded} = Bundle.load("convo.lmmlz", binary)
+      assert Bundle.narrative(loaded) == Bundle.narrative(bundle)
+      assert loaded.entries == bundle.entries
+    end
+
+    test "a name override renames the narrative entry" do
+      {:ok, bundle} = Bundle.new_zip("convo", "text", %{})
+      {:ok, binary} = Bundle.to_binary(bundle, "renamed.lmmlz")
+
+      assert {:ok, loaded} = Bundle.load("renamed.lmmlz", binary)
+      assert Bundle.name(loaded) == "renamed.lmml"
+    end
+
+    test "a text bundle has no archive form" do
+      {:ok, bundle} = Bundle.new_text("notes", "hello")
+      assert {:error, :not_a_zip_bundle} = Bundle.to_binary(bundle)
+    end
+  end
+
   describe "write!/2 round-trips" do
+    test "write! produces exactly the bytes to_binary/2 does for the target name", %{dir: dir} do
+      {:ok, bundle} = Bundle.new_zip("convo", "See @a.png.", %{"a.png" => "aa"})
+      path = Path.join(dir, "out.lmmlz")
+
+      :ok = Bundle.write!(bundle, path)
+      assert {:ok, expected} = Bundle.to_binary(bundle, "out.lmmlz")
+      assert File.read!(path) == expected
+    end
+
     test "a text bundle writes its narrative back out verbatim", %{dir: dir} do
       {:ok, bundle} = Bundle.new_text("foo", "Hello @a.png.")
       path = Path.join(dir, "foo.lmml")

@@ -50,6 +50,10 @@ defmodule Lmml do
   @spec load(String.t(), binary(), Bundle.load_opts()) :: {:ok, Bundle.t()} | {:error, term()}
   def load(name, content, opts \\ []), do: Bundle.load(name, content, opts)
 
+  @doc "Serializes a zip bundle into deterministic `.lmmlz` bytes. Delegates to `Lmml.Bundle.to_binary/2`."
+  @spec to_binary(Bundle.t(), String.t() | nil) :: {:ok, binary()} | {:error, term()}
+  def to_binary(bundle, name \\ nil), do: Bundle.to_binary(bundle, name)
+
   @doc "Builds a bare-text bundle from narrative text. Delegates to `Lmml.Bundle.new_text/2`."
   @spec new_text(String.t(), binary()) :: {:ok, Bundle.t()} | {:error, term()}
   def new_text(name, narrative), do: Bundle.new_text(name, narrative)
