@@ -130,4 +130,67 @@ defmodule Lmml.Narrative.SegmentTest do
       assert [%{role: :user, content: [%{"type" => "text"}]}] = rendered
     end
   end
+
+  describe "turn attributes" do
+    defp resolved(narrative) do
+      {:ok, bundle} = Bundle.new_text("t", narrative)
+      Resolver.resolve!(bundle)
+    end
+
+    test "a comment delimiter may carry key=value attributes after the role" do
+      turns =
+        Segment.segment(
+          resolved("""
+          <!-- user -->
+          Read the file.
+          <!-- tool trust=untrusted id=call-1 note="two words" -->
+          {"bytes": 12}
+          """)
+        )
+
+      assert [%Segment{role: :user, attributes: %{}}, %Segment{role: :tool} = tool] = turns
+      assert tool.attributes == %{"trust" => "untrusted", "id" => "call-1", "note" => "two words"}
+      assert Segment.trust(tool) == :untrusted
+    end
+
+    test "trust/1 is :unspecified when absent or unknown, never trusted by default" do
+      [user, assistant, tool] =
+        Segment.segment(
+          resolved("""
+          <!-- user -->
+          a
+          <!-- assistant trust=trusted -->
+          b
+          <!-- tool trust=sometimes -->
+          c
+          """)
+        )
+
+      assert Segment.trust(user) == :unspecified
+      assert Segment.trust(assistant) == :trusted
+      assert Segment.trust(tool) == :unspecified
+    end
+
+    test "an attribute value cannot be mistaken for the role" do
+      [turn] = Segment.segment(resolved("<!-- tool id=user-42 -->\nresult\n"))
+      assert turn.role == :tool
+      assert turn.attributes == %{"id" => "user-42"}
+    end
+
+    test "heading delimiters and the preamble carry no attributes" do
+      [context, user] = Segment.segment(resolved("intro\n## Turn 1 -- user\nhello\n"))
+      assert context.attributes == %{}
+      assert user.attributes == %{}
+    end
+
+    test "render_turns/2 adds attributes only when asked" do
+      resolved = resolved("<!-- tool trust=untrusted -->\nresult\n")
+
+      assert [%{role: :tool, content: _} = plain] = Segment.render_turns(resolved)
+      refute Map.has_key?(plain, :attributes)
+
+      assert [%{role: :tool, attributes: %{"trust" => "untrusted"}}] =
+               Segment.render_turns(resolved, attributes: true)
+    end
+  end
 end

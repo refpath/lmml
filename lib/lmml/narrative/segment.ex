@@ -28,6 +28,28 @@ defmodule Lmml.Narrative.Segment do
   (see `roles/0`). The delimiter line itself is a structural marker and is
   *not* included in the turn it opens.
 
+  ## Turn attributes
+
+  A comment delimiter may carry `key=value` attributes after the role,
+  e.g. `<!-- tool trust=untrusted id=call-1 -->`. Keys are
+  `[A-Za-z_][A-Za-z0-9_.-]*`; a value is either a bare token without
+  whitespace or a double-quoted string (`key="two words"`). Attributes
+  are exposed on the turn's `attributes` map with string keys and values,
+  so a host can carry structured facts about a turn without inventing
+  prose conventions. Heading delimiters carry no attributes.
+
+  Two attribute names are reserved by this library:
+
+    - `trust` -- `trusted` or `untrusted`; `trust/1` reads it. A tool
+      result, retrieved document or other content the author did not write
+      should be marked `untrusted` so a renderer or host never treats it
+      as instruction. Content with no `trust` attribute is `:unspecified`,
+      which is not a claim of trust.
+    - `id` -- a stable identifier for the turn, for example the call id of
+      a `:tool` turn's `Lmml.Manifest.ToolEvent`.
+
+  Unknown attributes are preserved untouched.
+
   ## Preamble and consecutive roles
 
   Narrative text before the first delimiter is a *preamble* and becomes a
@@ -62,15 +84,21 @@ defmodule Lmml.Narrative.Segment do
   @message_roles [:user, :assistant, :system, :tool]
 
   @enforce_keys [:role, :narrative, :embeds]
-  defstruct [:role, :narrative, :embeds]
+  defstruct [:role, :narrative, :embeds, attributes: %{}]
 
   @type role :: :context | :user | :assistant | :system | :tool
+
+  @typedoc "The `trust` a turn declares; `:unspecified` is absence, not trust."
+  @type trust :: :trusted | :untrusted | :unspecified
 
   @type t :: %__MODULE__{
           role: role(),
           narrative: binary(),
-          embeds: [Resolver.resolved_embed()]
+          embeds: [Resolver.resolved_embed()],
+          attributes: %{optional(String.t()) => String.t()}
         }
+
+  @attribute_pattern ~r/([A-Za-z_][A-Za-z0-9_.-]*)=(?:"([^"]*)"|(\S+))/
 
   @doc "Every role `Segment` recognizes, including the synthetic `:context` preamble role."
   @spec roles() :: [role()]
@@ -79,6 +107,16 @@ defmodule Lmml.Narrative.Segment do
   @doc "The roles that map onto real message roles (`:context` is excluded)."
   @spec message_roles() :: [role()]
   def message_roles, do: @message_roles
+
+  @doc """
+  The trust a turn declares through its `trust` attribute: `:trusted`,
+  `:untrusted`, or `:unspecified` when the attribute is absent or carries
+  a value this library does not define.
+  """
+  @spec trust(t()) :: trust()
+  def trust(%__MODULE__{attributes: %{"trust" => "trusted"}}), do: :trusted
+  def trust(%__MODULE__{attributes: %{"trust" => "untrusted"}}), do: :untrusted
+  def trust(%__MODULE__{}), do: :unspecified
 
   @doc """
   Splits a resolved narrative into an ordered list of `t()` turns.
@@ -104,14 +142,27 @@ defmodule Lmml.Narrative.Segment do
 
   `opts` are forwarded to `Lmml.Narrative.Renderer.render/2` (see its
   `:max_embed_bytes`), so a per-message payload budget applies uniformly.
+  Pass `attributes: true` to add each turn's `attributes` map to its
+  message; the default shape stays `%{role: ..., content: ...}` so the
+  result can be handed to an API as-is.
   """
-  @spec render_turns(Resolver.t(), keyword()) :: [%{role: role(), content: [map()]}]
+  @spec render_turns(Resolver.t(), keyword()) :: [
+          %{
+            required(:role) => role(),
+            required(:content) => [map()],
+            optional(:attributes) => map()
+          }
+        ]
   def render_turns(%Resolver{} = resolved, opts \\ []) do
+    {with_attributes, render_opts} = Keyword.pop(opts, :attributes, false)
+
     resolved
     |> segment()
     |> Enum.map(fn turn ->
       per_turn = %Resolver{narrative: turn.narrative, embeds: turn.embeds}
-      %{role: turn.role, content: Renderer.render(per_turn, opts)}
+      message = %{role: turn.role, content: Renderer.render(per_turn, render_opts)}
+
+      if with_attributes, do: Map.put(message, :attributes, turn.attributes), else: message
     end)
   end
 
@@ -125,7 +176,7 @@ defmodule Lmml.Narrative.Segment do
     regions =
       case delimiters do
         [] ->
-          [{:context, 0, byte_size(narrative)}]
+          [{:context, %{}, 0, byte_size(narrative)}]
 
         _ ->
           build_regions(narrative, delimiters)
@@ -133,7 +184,7 @@ defmodule Lmml.Narrative.Segment do
 
     embed_offsets = locate_embeds(narrative, embeds)
 
-    Enum.map(regions, fn {role, from, to} ->
+    Enum.map(regions, fn {role, attributes, from, to} ->
       turn_embeds =
         embeds
         |> Enum.with_index()
@@ -144,7 +195,7 @@ defmodule Lmml.Narrative.Segment do
 
       text = binary_part(narrative, from, to - from)
 
-      %__MODULE__{role: role, narrative: text, embeds: turn_embeds}
+      %__MODULE__{role: role, narrative: text, embeds: turn_embeds, attributes: attributes}
     end)
   end
 
@@ -156,8 +207,9 @@ defmodule Lmml.Narrative.Segment do
   end
 
   # Builds the text regions between role delimiters. `delimiters` is a list
-  # of `{role, delim_start, delim_end}` where `delim_end` is the byte offset
-  # just past the delimiter line (including its newline). Region boundaries:
+  # of `{role, attributes, delim_start, delim_end}` where `delim_end` is the
+  # byte offset just past the delimiter line (including its newline). Region
+  # boundaries:
   #   - any preamble before the first delimiter becomes a `:context` region;
   #   - each delimiter opens a region of its `role` running from just after
   #     the delimiter to the next delimiter's start (or the text's end).
@@ -167,8 +219,8 @@ defmodule Lmml.Narrative.Segment do
     # A preamble region, unless the very first delimiter starts at byte 0.
     preamble =
       case delimiters do
-        [{_role, 0, _dend} | _] -> []
-        [{_role, dstart, _dend} | _] -> [{:context, 0, dstart}]
+        [{_role, _attrs, 0, _dend} | _] -> []
+        [{_role, _attrs, dstart, _dend} | _] -> [{:context, %{}, 0, dstart}]
       end
 
     # For each consecutive delimiter pair, the earlier delimiter's region runs
@@ -176,11 +228,13 @@ defmodule Lmml.Narrative.Segment do
     middle =
       delimiters
       |> Enum.chunk_every(2, 1, :discard)
-      |> Enum.map(fn [{role, _ds, dend}, {_nr, nstart, _nend}] -> {role, dend, nstart} end)
+      |> Enum.map(fn [{role, attrs, _ds, dend}, {_nr, _na, nstart, _nend}] ->
+        {role, attrs, dend, nstart}
+      end)
 
     # The final delimiter's region runs to the very end of the narrative.
-    {last_role, _ds, last_dend} = List.last(delimiters)
-    final = {last_role, last_dend, total}
+    {last_role, last_attrs, _ds, last_dend} = List.last(delimiters)
+    final = {last_role, last_attrs, last_dend, total}
 
     preamble ++ middle ++ [final]
   end
@@ -190,15 +244,15 @@ defmodule Lmml.Narrative.Segment do
   # ---------------------------------------------------------------------
 
   # Scans the narrative line by line (tracking byte offsets) and returns the
-  # role delimiters in order: `[{role, line_start, line_end}]` where
-  # `line_end` is just past the delimiter's own trailing newline.
+  # role delimiters in order: `[{role, attributes, line_start, line_end}]`
+  # where `line_end` is just past the delimiter's own trailing newline.
   defp find_delimiters(narrative) do
     narrative
     |> lines_with_offsets()
     |> Enum.flat_map(fn {line, start, after_newline} ->
       case role_of_line(line) do
         nil -> []
-        role -> [{role, start, after_newline}]
+        {role, attributes} -> [{role, attributes, start, after_newline}]
       end
     end)
   end
@@ -226,7 +280,7 @@ defmodule Lmml.Narrative.Segment do
     end
   end
 
-  # Returns the role a single line names, or `nil` if it isn't a delimiter.
+  # Returns `{role, attributes}` for a delimiter line, or `nil` if it isn't one.
   defp role_of_line(line) do
     trimmed = String.trim(line)
 
@@ -248,7 +302,11 @@ defmodule Lmml.Narrative.Segment do
 
   defp heading_role(line) do
     inner = Regex.replace(~r/^\#{1,6}[ \t]+/, line, "")
-    role_token(inner)
+
+    case role_token(inner) do
+      nil -> nil
+      role -> {role, %{}}
+    end
   end
 
   defp comment?(line) do
@@ -262,7 +320,29 @@ defmodule Lmml.Narrative.Segment do
       |> String.replace_suffix("-->", "")
       |> String.trim()
 
-    role_token(inner)
+    # Attributes are stripped before the role is looked up, so a value such
+    # as `id=user-42` can never be mistaken for the role token.
+    {attributes, rest} = split_attributes(inner)
+
+    case role_token(rest) do
+      nil -> nil
+      role -> {role, attributes}
+    end
+  end
+
+  # Extracts every `key=value` / `key="quoted value"` pair from `text`,
+  # returning them as a map plus the text with the pairs removed.
+  defp split_attributes(text) do
+    attributes =
+      @attribute_pattern
+      |> Regex.scan(text)
+      |> Map.new(fn
+        [_whole, key, quoted, ""] -> {key, quoted}
+        [_whole, key, "", bare] -> {key, bare}
+        [_whole, key, quoted] -> {key, quoted}
+      end)
+
+    {attributes, Regex.replace(@attribute_pattern, text, " ")}
   end
 
   # Finds the first whole-word role token in `text`.
