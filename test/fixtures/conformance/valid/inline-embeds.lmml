@@ -1,0 +1,15 @@
+# Inline embeds
+
+Settings travel inline:
+
+@@@settings.yaml
+model: example-model
+temperature: 0.2
+@@@
+
+So do notes, verbatim, including `@not-a-reference` inside a code span.
+
+@@@notes.txt
+Line one.
+Line two with trailing spaces.   
+@@@

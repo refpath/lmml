@@ -1,0 +1,7 @@
+@@@a.txt
+actual content
+@@@
+
+@@@manifest.json
+{"lmml_version":"1","entries":{"a.txt":{"sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":15}}}
+@@@

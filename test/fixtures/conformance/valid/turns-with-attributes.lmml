@@ -1,0 +1,16 @@
+<!-- system trust=trusted -->
+You are a careful assistant.
+<!-- user -->
+Please read the notes.
+<!-- assistant -->
+Reading them now.
+<!-- tool trust=untrusted id=call-1 -->
+@@@call-1.json
+{"path":"notes.txt"}
+@@@
+
+@@@result-1.json
+{"bytes":42}
+@@@
+<!-- assistant -->
+Done.
