@@ -23,6 +23,7 @@ defmodule Lmml.Manifest do
   |---|---|---|
   | `lmml_version` | yes | the manifest schema major version, `"1"` |
   | `entries` | yes | object keyed by embed name; each value has `sha256` (64 lowercase hex chars), `size` (bytes) and optionally `media_type` and `trust` (`"trusted"` or `"untrusted"`) |
+  | `tool_events` | no | see `Lmml.Manifest.ToolEvent` |
   | `extensions` | no | object keyed by reverse-DNS namespace; values are opaque objects other tools may read and must preserve |
 
   Any other top-level key is application metadata: `load/1` preserves it
@@ -71,6 +72,10 @@ defmodule Lmml.Manifest do
           | {:unknown_trust, String.t()}
           | {:unresolvable_embed, String.t()}
           | {:malformed_extensions, term()}
+          | {:malformed_tool_events, term()}
+          | {:malformed_tool_event, non_neg_integer()}
+          | {:duplicate_call_id, String.t()}
+          | {:missing_tool_embed, {String.t(), String.t()}}
 
   @doc "The reserved embed name a bundle's manifest is looked up by, if present."
   @spec name() :: String.t()
@@ -216,7 +221,7 @@ defmodule Lmml.Manifest do
   Options:
 
     - `:data` -- a map of additional top-level members to carry (session
-      ids, model names, an `extensions` object). It cannot
+      ids, model names, an `extensions` object, `tool_events`). It cannot
       override `lmml_version` or `entries`; an attempt is an
       `{:error, {:reserved_key, key}}`.
     - `:trust` -- a map of embed name to `"trusted"` / `"untrusted"`,
@@ -341,8 +346,8 @@ defmodule Lmml.Manifest do
   Verifies `bundle` against its own manifest: every embed the narrative
   mentions must have an entry whose digest and size match the resolved
   content, every entry must correspond to an embed or archive entry that
-  exists, and every declared `trust` and `extensions` member must be
-  well-formed. Every issue found is reported at once.
+  exists, and every declared `trust`, `extensions` and `tool_events`
+  member must be well-formed. Every issue found is reported at once.
 
   Returns `:ok`, or `{:error, issues}` where `issues` is a non-empty list
   of `t:issue/0`. A bundle with no manifest is `{:error, [:no_manifest]}`
@@ -370,7 +375,10 @@ defmodule Lmml.Manifest do
         {:error, [:unversioned_manifest]}
 
       _version ->
-        issues = entries_issues(bundle, manifest) ++ extensions_issues(manifest)
+        issues =
+          entries_issues(bundle, manifest) ++
+            extensions_issues(manifest) ++
+            __MODULE__.ToolEvent.issues(manifest, bundle)
 
         if issues == [], do: :ok, else: {:error, issues}
     end
