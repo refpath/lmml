@@ -89,6 +89,25 @@ To build a bundle programmatically:
 :ok = Lmml.Bundle.write!(bundle, "convo.lmmlz")
 ```
 
+To bind the bundle's content to digests a reader can verify, attach a
+manifest before writing it, and verify one you received:
+
+```elixir
+{:ok, manifest} = Lmml.Manifest.build(bundle, trust: %{"a.png" => "untrusted"})
+{:ok, bundle} = Lmml.Manifest.attach(bundle, manifest)
+{:ok, digest} = Lmml.Manifest.digest(manifest)
+
+{:ok, received} = Lmml.load("convo.lmmlz", bytes, policy: [max_total_bytes: 8_000_000])
+:ok = Lmml.Manifest.verify(received)
+```
+
+Archives are opened under an `Lmml.Archive.Policy` that bounds what they
+may declare before any entry is inflated, and `Lmml.Bundle.to_binary/2`
+writes the same bundle to the same bytes every time. Turns may carry
+attributes such as `<!-- tool trust=untrusted id=call-1 -->`; see
+[`docs/SECURITY.md`](docs/SECURITY.md) for what the library enforces and
+what a host must still decide.
+
 See the `examples/` directory in the repository for complete worked
 examples: a settings-only bare `.lmml` narrative, and a multi-turn
 conversation with an embedded image packed as `.lmmlz`, resolved and
@@ -108,6 +127,9 @@ rendered end to end.
 - `mix lmml.validate SOURCE` -- cross-checks a bundle's references,
   entries, and embed names, failing (non-zero exit) if any issue is
   found; suitable as a CI check.
+- `mix lmml.verify SOURCE` -- opens a bundle under the archive policy and
+  verifies every embed against the digests its manifest declares, offline,
+  failing (non-zero exit) on any issue.
 
 ## Documentation
 

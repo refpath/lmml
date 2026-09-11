@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Versioned manifest with content digests** (`Lmml.Manifest`) -- `manifest.json` now declares `lmml_version` and binds every embed to its SHA-256, size and media type in `entries`, with optional per-entry `trust`, namespaced `extensions` and `tool_events` (`Lmml.Manifest.ToolEvent`). `build/2` derives a manifest from a bundle, `attach/2` carries it as an archive entry or inline block, `verify/1` reports every mismatch at once, and `digest/1` is taken over the canonical encoding. An archive entry named `manifest.json` is found even when the narrative does not mention it, and is no longer reported as orphaned. A manifest declaring an unknown major version is refused at load.
+- **Canonical JSON and digests** (`Lmml.Canonical`, `Lmml.Digest`) -- sorted-key, whitespace-free encoding so the same value always yields the same bytes; SHA-256 as lowercase hex with constant-time comparison.
+- **Archive policy** (`Lmml.Archive.Policy`) -- entry count, per-entry and total declared size, compression ratio and name length are bounded against the central directory before any entry is inflated, and declared sizes are verified after inflation. `Lmml.Bundle.load/3` opens bytes already in memory under the same checks; `open/2` takes the same options.
+- **Deterministic archives** (`Lmml.Bundle.to_binary/2`) -- entries are written in name order with a fixed timestamp, so the same bundle always serializes to the same bytes.
+- **Turn attributes** (`Lmml.Narrative.Segment`) -- comment delimiters may carry `key=value` pairs; `trust` (`trusted`/`untrusted`, read by `Segment.trust/1`) and `id` are reserved. `render_turns/2` adds them on request.
+- **`mix lmml.verify SOURCE`** -- offline structural validation plus manifest digest verification, with policy limits on the command line.
+- **Conformance fixtures** under `test/fixtures/conformance` with golden manifest digests, plus seeded round-trip invariants.
+- **Security documentation** (`docs/SECURITY.md`) and RFC sections for entry names, resource limits, deterministic serialization, manifest schema and digests, turn attributes and compatibility policy.
+
+### Changed
+
+- Entry names must be plain relative paths with no empty, `.` or `..` segments, valid UTF-8 without control characters and in Unicode NFC; names that collide after case folding, and directory, link or device entries, are rejected. Two entries with the same name previously let the last one win silently.
+- `Lmml.Bundle.write!/2` now emits deterministic bytes (fixed timestamps, sorted entries) instead of stamping the wall clock.
+- `Lmml.Manifest.fetch/2` returns `{:ok, nil}` for an explicit JSON `null`, as its documentation already stated (it returned `{:ok, :null}`).
+
 - **Top-level façade** (`Lmml`) -- Added convenience delegators (`Lmml.open/1`, `open!/1`, `resolve/1`, `resolve!/1`, `render/2`, `to_md/2`, `validate/1`, `pack/2`, `pack!/2`, `inline/2`, `inline!/2`, `segment/2`, `render_turns/2`, `settings/2`, `manifest/1`, `embeds/1`, `narrative/1`).
 - **Turn-level / multi-message segmentation** (`Lmml.Narrative.Segment`) -- Splits a narrative into role-labeled messages (`:user`, `:assistant`, `:system`, `:tool`, `:context`), assigning embeds to their respective turns and mapping to API message structures.
 - **Typed project settings** (`Lmml.Settings`) -- Structured helper for loading `settings.yaml` / `settings.json` embeds, featuring a built-in YAML-subset parser.

@@ -94,6 +94,7 @@ defmodule Lmml.MixProject do
       "docs/THE_LMML_MANIFESTO.md": [title: "Why LMML?"],
       "docs/RFC_LMML_FORMAT.md": [title: "RFC Specification"],
       "docs/LANGUAGE_REFERENCE.md": [title: "Language Reference"],
+      "docs/SECURITY.md": [title: "Security"],
       LICENSE: [title: "License"],
       "CHANGELOG.md": [title: "Changelog"]
     ]
@@ -131,7 +132,13 @@ defmodule Lmml.MixProject do
         Lmml.Embed,
         Lmml.Pack,
         Lmml.Settings,
-        Lmml.Manifest
+        Lmml.Manifest,
+        Lmml.Manifest.ToolEvent
+      ],
+      Integrity: [
+        Lmml.Archive.Policy,
+        Lmml.Canonical,
+        Lmml.Digest
       ],
       Content: [
         Lmml.Document,
@@ -148,7 +155,8 @@ defmodule Lmml.MixProject do
         Mix.Tasks.Lmml.Pack,
         Mix.Tasks.Lmml.Render,
         Mix.Tasks.Lmml.ToMd,
-        Mix.Tasks.Lmml.Validate
+        Mix.Tasks.Lmml.Validate,
+        Mix.Tasks.Lmml.Verify
       ]
     ]
   end

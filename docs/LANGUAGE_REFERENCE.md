@@ -256,3 +256,14 @@ crashes the underlying parser outright, since it matches one UTF-8
 codepoint at a time with no defined behavior for an invalid byte
 sequence appearing mid-text. A binary asset should simply stay external
 via `@name.ext`, which is exactly what `.lmmlz` archives are for.
+
+## 8. Integrity, trust and archive safety
+
+Three later additions are specified normatively in the RFC (`docs/RFC_LMML_FORMAT.md`) and summarized here:
+
+- **Versioned manifest with digests** (RFC §5.1): `manifest.json` declares `lmml_version` and binds every embed to its SHA-256 and size in `entries`; `Lmml.Manifest.build/2`, `attach/2` and `verify/1` produce, carry and check it, and `mix lmml.verify` does the same from the command line. Optional `tool_events` record tool calls and results by embed name; `extensions` carry namespaced, opaque objects.
+- **Turn attributes** (RFC §6.3): a comment delimiter may carry `key=value` pairs, e.g. `<!-- tool trust=untrusted id=call-1 -->`; `trust` and `id` are reserved, and an unmarked turn is *unspecified*, not trusted.
+- **Archive safety** (RFC §3.3–§3.5): entry names must be plain, NFC, control-free and case-distinct; directories and links are rejected; an `Lmml.Archive.Policy` bounds entry count, sizes, compression ratio and name length before anything is inflated; writers emit deterministic bytes.
+
+`docs/SECURITY.md` describes what the library enforces and what a host must still decide.
+
