@@ -440,7 +440,8 @@ defmodule Lmml.Bundle do
       external reference, since a bare `.lmml` has no entries at all to
       resolve one against.
     - `{:orphaned_entry, name}` -- a zip entry that no embed in the
-      narrative actually mentions.
+      narrative actually mentions. A `manifest.json` entry is exempt: it
+      is the bundle's manifest whether or not the prose refers to it.
     - `{:malformed_embed_name, name}` -- an embed name (inline or
       external) that could not safely become a zip entry name (see
       `validate_entry_names/1`). This applies to every embed, not only
@@ -474,6 +475,8 @@ defmodule Lmml.Bundle do
     |> Enum.map(fn %Embed{name: name} -> {:missing_reference, name} end)
   end
 
+  # An archive entry named `manifest.json` is the bundle's manifest whether or
+  # not the narrative mentions it (see `Lmml.Manifest`), so it is never orphaned.
   defp orphaned_entry_issues(%__MODULE__{document: document, entries: entries}) do
     referenced =
       document
@@ -482,7 +485,7 @@ defmodule Lmml.Bundle do
 
     entries
     |> Map.keys()
-    |> Enum.reject(&MapSet.member?(referenced, &1))
+    |> Enum.reject(&(MapSet.member?(referenced, &1) or &1 == Lmml.Manifest.name()))
     |> Enum.map(&{:orphaned_entry, &1})
   end
 
