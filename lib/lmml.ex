@@ -22,10 +22,10 @@ defmodule Lmml do
 
   Across the entire surface of `lmml`:
 
-    - **Constructors and loaders** (`open/1`, `resolve/1`, `pack/2`,
-      `inline/2`, `manifest/1`, `settings/2`) return tagged tuples
-      `{:ok, result}` or `{:error, reason}` by default.
-    - Bang variants (`open!/1`, `resolve!/1`, `pack!/2`, `inline!/2`,
+    - **Constructors and loaders** (`open/2`, `load/3`, `resolve/1`,
+      `pack/2`, `inline/2`, `manifest/1`, `settings/2`) return tagged
+      tuples `{:ok, result}` or `{:error, reason}` by default.
+    - Bang variants (`open!/2`, `resolve!/1`, `pack!/2`, `inline!/2`,
       `manifest!/1`, `settings!/2`) raise on failure.
     - **I/O Writers** (`Bundle.write!/2`) raise on failure.
   """
@@ -38,13 +38,17 @@ defmodule Lmml do
   alias Lmml.Pack
   alias Lmml.Settings
 
-  @doc "Opens a `.lmml`/`.lmmlz` entity from disk. Delegates to `Lmml.Bundle.open/1`."
-  @spec open(Path.t()) :: {:ok, Bundle.t()} | {:error, term()}
-  def open(path), do: Bundle.open(path)
+  @doc "Opens a `.lmml`/`.lmmlz` entity from disk. Delegates to `Lmml.Bundle.open/2`."
+  @spec open(Path.t(), Bundle.load_opts()) :: {:ok, Bundle.t()} | {:error, term()}
+  def open(path, opts \\ []), do: Bundle.open(path, opts)
 
-  @doc "Same as `open/1`, but raises on failure. Delegates to `Lmml.Bundle.open!/1`."
-  @spec open!(Path.t()) :: Bundle.t()
-  def open!(path), do: Bundle.open!(path)
+  @doc "Same as `open/2`, but raises on failure. Delegates to `Lmml.Bundle.open!/2`."
+  @spec open!(Path.t(), Bundle.load_opts()) :: Bundle.t()
+  def open!(path, opts \\ []), do: Bundle.open!(path, opts)
+
+  @doc "Loads a `.lmml`/`.lmmlz` entity from bytes in memory. Delegates to `Lmml.Bundle.load/3`."
+  @spec load(String.t(), binary(), Bundle.load_opts()) :: {:ok, Bundle.t()} | {:error, term()}
+  def load(name, content, opts \\ []), do: Bundle.load(name, content, opts)
 
   @doc "Builds a bare-text bundle from narrative text. Delegates to `Lmml.Bundle.new_text/2`."
   @spec new_text(String.t(), binary()) :: {:ok, Bundle.t()} | {:error, term()}

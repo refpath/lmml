@@ -11,14 +11,44 @@ defmodule Lmml.Bundle do
       (`foo.lmmlz` contains `foo.lmml`), plus whatever other entries its
       `@name.ext` references point at.
 
-  `open/1` detects which form a file is by sniffing its content (the zip
+  `open/2` detects which form a file is by sniffing its content (the zip
   local-file-header magic bytes), not by trusting its extension, and
   either way returns a `Bundle` exposing the exact same API: `narrative/1`,
-  `embeds/1`, `embed/2`, `entries/1`.
+  `embeds/1`, `embed/2`, `entries/1`. `load/3` does the same for bytes
+  already in memory, which is how a host that receives an archive over
+  the network (rather than from its own disk) opens it.
+
+  ## Opening untrusted archives
+
+  A zip archive is untrusted input. Before any entry is inflated, `load/3`
+  reads the archive's central directory and rejects it when:
+
+    - an entry name could escape the bundle root or is ambiguous -- see
+      `validate_entry_names/1`;
+    - two entries would collide once names are Unicode-normalized and
+      case-folded (`{:duplicate_entry, name}`);
+    - an entry is not a regular file -- a directory, symlink or device
+      entry (`{:non_regular_entry, name}`);
+    - the declared sizes, entry count, name lengths or compression ratios
+      exceed the `Lmml.Archive.Policy` in effect (`:policy` option,
+      default `Lmml.Archive.Policy.default/0`).
+
+  After inflation every entry's actual byte size must match what the
+  directory declared (`{:size_mismatch, name}`), so a header that lies
+  about its size cannot slip past the policy.
+
+  Nothing in this module ever dereferences a URI or reads a file other
+  than the one path handed to `open/2`: an external reference resolves
+  against the archive's own entries or not at all.
   """
 
+  alias Lmml.Archive.Policy
   alias Lmml.Document
   alias Lmml.Embed
+
+  require Record
+
+  Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
   @enforce_keys [:kind, :name, :narrative, :document, :entries]
   defstruct [:kind, :name, :narrative, :document, :entries]
@@ -34,36 +64,63 @@ defmodule Lmml.Bundle do
           entries: %{optional(String.t()) => binary()}
         }
 
+  @typedoc "Options accepted by `open/2` and `load/3`."
+  @type load_opts :: [policy: Policy.t() | keyword()]
+
   # Local file header signature ("PK\x03\x04"), the byte sequence every
   # non-empty zip archive starts with. Sniffing this (rather than trusting
-  # the `.lmml`/`.lmmlz` extension) is what lets `open/1` treat a
+  # the `.lmml`/`.lmmlz` extension) is what lets `open/2` treat a
   # misnamed or extensionless file correctly, and is the same technique
   # `.docx`/`.epub`-style "zip wearing a different extension" formats rely on.
   @zip_magic <<0x50, 0x4B, 0x03, 0x04>>
 
   # ---------------------------------------------------------------------
-  # Opening from disk
+  # Opening from disk or memory
   # ---------------------------------------------------------------------
 
   @doc """
   Opens a `lmml` entity from disk, auto-detecting whether `path` is a bare
-  text narrative or a zip archive by sniffing its content.
+  text narrative or a zip archive by sniffing its content. Accepts the
+  same `opts` as `load/3`.
   """
-  @spec open(Path.t()) :: {:ok, t()} | {:error, term()}
-  def open(path) do
+  @spec open(Path.t(), load_opts()) :: {:ok, t()} | {:error, term()}
+  def open(path, opts \\ []) do
     with {:ok, content} <- File.read(path) do
-      name = path |> Path.basename() |> narrative_name_for()
-
-      if zip_content?(content), do: open_zip(name, content), else: open_text(name, content)
+      load(Path.basename(path), content, opts)
     end
   end
 
-  @doc "Same as `open/1`, but raises on failure."
-  @spec open!(Path.t()) :: t()
-  def open!(path) do
-    case open(path) do
+  @doc "Same as `open/2`, but raises on failure."
+  @spec open!(Path.t(), load_opts()) :: t()
+  def open!(path, opts \\ []) do
+    case open(path, opts) do
       {:ok, bundle} -> bundle
       {:error, reason} -> raise "Failed to open lmml bundle at #{path}: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Loads a `lmml` entity from bytes already in memory. `name` plays the
+  role `open/2` gives the file's basename: it is normalized to the
+  logical narrative name (`convo.lmmlz` and `convo` both become
+  `convo.lmml`) and, for an archive, names the entry that must hold the
+  narrative.
+
+  Options:
+
+    - `:policy` -- an `Lmml.Archive.Policy` (or keyword overrides for
+      `Lmml.Archive.Policy.new/1`) bounding what an archive may declare.
+      Defaults to `Lmml.Archive.Policy.default/0`. Ignored for bare text.
+  """
+  @spec load(String.t(), binary(), load_opts()) :: {:ok, t()} | {:error, term()}
+  def load(name, content, opts \\ []) when is_binary(name) and is_binary(content) do
+    narrative_name = narrative_name_for(name)
+
+    if zip_content?(content) do
+      policy = opts |> Keyword.get(:policy, Policy.default()) |> Policy.new()
+      open_zip(narrative_name, content, policy)
+    else
+      open_text(narrative_name, content)
     end
   end
 
@@ -80,10 +137,11 @@ defmodule Lmml.Bundle do
     end
   end
 
-  defp open_zip(name, content) do
-    with :ok <- validate_zip_table(content),
+  defp open_zip(name, content, policy) do
+    with {:ok, table} <- read_table(content),
+         :ok <- validate_table(table, policy),
          {:ok, raw_entries} <- unzip(content),
-         :ok <- validate_entry_names(Map.keys(raw_entries)),
+         :ok <- validate_sizes(raw_entries, table),
          {:ok, narrative} <- fetch_narrative(raw_entries, name),
          {:ok, document} <- Document.parse(narrative) do
       entries = Map.delete(raw_entries, name)
@@ -99,33 +157,44 @@ defmodule Lmml.Bundle do
     end
   end
 
-  # Inspects the archive's central-directory entry names *before* any
-  # in-memory extraction happens, so a hostile archive that tries to
-  # escape the bundle root (an absolute path, a `..` segment, or a
-  # backslash) is rejected with a clean `{:error, {:unsafe_entry, ...}}`
-  # rather than being silently sanitized down to a bare basename by
-  # `:zip.unzip/2` (which does collapse such names, but only with a
-  # side-channel warning log the caller never sees). This is the same
-  # defense `validate_entry_names/1` provides for entries that never go
-  # through `:zip` at all (see `new_zip/3`); here it runs against the
-  # archive's own table *before* extraction.
-  defp validate_zip_table(content) do
+  # Reads the archive's central directory into `{name, file_info,
+  # compressed_size}` triples, keeping only real file entries (`:zip.table/1`
+  # also yields a leading `{:zip_comment, ...}` tuple).
+  defp read_table(content) do
     case :zip.table(content) do
       {:ok, table} ->
-        names = table |> Enum.map(&entry_name/1) |> Enum.reject(&is_nil/1)
-        validate_entry_names(names)
+        {:ok,
+         for {:zip_file, name, info, _comment, _offset, compressed_size} <- table do
+           {to_string(name), info, compressed_size}
+         end}
 
       {:error, reason} ->
         {:error, {:invalid_zip, reason}}
     end
   end
 
-  # `:zip.table/1` returns a list whose elements are `{:zip_file, name,
-  # info, comment, offset, csize}` tuples (one per entry) plus a leading
-  # `{:zip_comment, comment}` tuple. We keep only the real file entries and
-  # take each one's filename (element 2).
-  defp entry_name({:zip_file, name, _info, _comment, _offset, _csize}), do: to_string(name)
-  defp entry_name(_non_file_entry), do: nil
+  # Every check here runs against the central directory alone, *before*
+  # `:zip.unzip/2` inflates a single entry: name safety, duplicate and
+  # non-regular entries, then the resource policy.
+  defp validate_table(table, policy) do
+    names = Enum.map(table, fn {name, _info, _csize} -> name end)
+
+    with :ok <- validate_entry_names(names),
+         :ok <- validate_regular(table) do
+      Policy.check_table(policy, Enum.map(table, &table_entry/1))
+    end
+  end
+
+  defp validate_regular(table) do
+    case Enum.find(table, fn {_name, info, _csize} -> file_info(info, :type) != :regular end) do
+      nil -> :ok
+      {name, _info, _csize} -> {:error, {:non_regular_entry, name}}
+    end
+  end
+
+  defp table_entry({name, info, compressed_size}) do
+    %{name: name, size: file_info(info, :size), compressed_size: compressed_size}
+  end
 
   defp unzip(content) do
     case :zip.unzip(content, [:memory]) do
@@ -135,6 +204,18 @@ defmodule Lmml.Bundle do
       {:error, reason} ->
         {:error, {:invalid_zip, reason}}
     end
+  end
+
+  # The directory's declared sizes are what the policy was checked against;
+  # an entry that inflates to a different size lied, and is rejected so a
+  # forged header cannot smuggle more bytes past the limit than declared.
+  defp validate_sizes(entries, table) do
+    Enum.reduce_while(table, :ok, fn {name, info, _csize}, :ok ->
+      case Map.fetch(entries, name) do
+        {:ok, data} when byte_size(data) == file_info(info, :size) -> {:cont, :ok}
+        _mismatch_or_missing -> {:halt, {:error, {:size_mismatch, name}}}
+      end
+    end)
   end
 
   defp fetch_narrative(entries, name) do
@@ -170,19 +251,21 @@ defmodule Lmml.Bundle do
   @doc """
   Builds a zip-backed bundle directly from narrative text plus a map of
   external entries (`%{"image.png" => <<bytes>>}`), without touching disk.
-  Every entry name is path-safety validated the same way `open/1` validates
-  entries read from a real archive.
+  Every entry name is validated the same way `load/3` validates entries
+  read from a real archive (see `validate_entry_names/1`).
   """
   @spec new_zip(String.t(), binary(), %{optional(String.t()) => binary()}) ::
           {:ok, t()} | {:error, term()}
   def new_zip(name, narrative, entries \\ %{})
       when is_binary(name) and is_binary(narrative) and is_map(entries) do
-    with :ok <- validate_entry_names(Map.keys(entries)),
+    narrative_name = narrative_name_for(name)
+
+    with :ok <- validate_entry_names([narrative_name | Map.keys(entries)]),
          {:ok, document} <- Document.parse(narrative) do
       {:ok,
        %__MODULE__{
          kind: :zip,
-         name: narrative_name_for(name),
+         name: narrative_name,
          narrative: narrative,
          document: document,
          entries: entries
@@ -292,7 +375,7 @@ defmodule Lmml.Bundle do
 
   @doc """
   Cross-checks a bundle's narrative against its own entries and its own
-  internal consistency. This is a distinct, opt-in step from `open/1` or
+  internal consistency. This is a distinct, opt-in step from `open/2` or
   `new_zip/3` (which only ever reject an entry name that is outright
   *unsafe* -- see `validate_entry_names/1`): `validate/1` instead catches
   authoring mistakes that are still perfectly well-formed as far as
@@ -308,8 +391,8 @@ defmodule Lmml.Bundle do
     - `{:malformed_embed_name, name}` -- an embed name (inline or
       external) that could not safely become a zip entry name (see
       `validate_entry_names/1`). This applies to every embed, not only
-      inline ones, since `Lmml.Pack.pack/2` (planned) can turn any inline
-      embed into a real zip entry later.
+      inline ones, since `Lmml.Pack.pack/2` can turn any inline embed
+      into a real zip entry later.
     - `{:conflicting_embed, name}` -- two or more embeds share a name but
       disagree on content (including disagreeing on inline-vs-external),
       which is an authoring mistake: a name is meant to identify one
@@ -382,32 +465,87 @@ defmodule Lmml.Bundle do
     end
   end
 
-  @doc """
-  Validates that none of `names` could escape the bundle root when
-  resolved: no absolute paths, no `..` path segments. Used both when
-  opening a zip archive (every entry it contains) and when resolving a
-  single reference at read time.
+  @typedoc "Why `validate_entry_names/1` rejected a name."
+  @type name_issue ::
+          {:unsafe_entry, String.t()}
+          | {:ambiguous_entry_name, String.t()}
+          | {:duplicate_entry, String.t()}
 
-  Note: for archives that actually went through `:zip.unzip/2` (i.e. every
-  entry reaching this check via `open/1`), Erlang's own zip implementation
-  has *already* sanitized traversal/absolute entry names down to a bare
-  basename (logging a warning as it does so) by the time this runs -- so
-  in practice this check rarely has anything to catch on that path. It
-  remains meaningful as the *only* line of defense for entries that never
-  go through `:zip` at all, i.e. those supplied directly to `new_zip/3`.
+  @doc """
+  Validates that `names` are safe, unambiguous and distinct entry names.
+  Used when opening an archive (every entry its directory lists), when
+  building one in memory (`new_zip/3`) and when resolving a single
+  reference at read time.
+
+  A name is **unsafe** (`{:unsafe_entry, name}`) when resolving it could
+  leave the bundle root or is not a plain relative path: it is empty,
+  starts with `/`, contains a backslash, or has a `..`, `.` or empty
+  segment (so `a//b` and a trailing `/` are rejected too).
+
+  A name is **ambiguous** (`{:ambiguous_entry_name, name}`) when two
+  readers could disagree about which entry it denotes or how to display
+  it: it is not valid UTF-8, contains a control character, or is not in
+  Unicode Normalization Form C. Requiring NFC means a name has exactly
+  one byte representation, so a digest bound to it is unambiguous.
+
+  Two names are **duplicates** (`{:duplicate_entry, name}`) when they are
+  equal after case folding -- distinct entries that collide on a
+  case-insensitive filesystem, or that a reviewer cannot tell apart, are
+  an authoring error rather than something to resolve silently.
+
+  The first offending name is reported.
   """
-  @spec validate_entry_names([String.t()]) :: :ok | {:error, {:unsafe_entry, String.t()}}
+  @spec validate_entry_names([String.t()]) :: :ok | {:error, name_issue()}
   def validate_entry_names(names) do
-    case Enum.find(names, &(not safe_entry_name?(&1))) do
-      nil -> :ok
-      unsafe -> {:error, {:unsafe_entry, unsafe}}
+    with :ok <- each_name_valid(names) do
+      duplicates(names)
+    end
+  end
+
+  defp each_name_valid(names) do
+    Enum.reduce_while(names, :ok, fn name, :ok ->
+      cond do
+        not safe_entry_name?(name) -> {:halt, {:error, {:unsafe_entry, name}}}
+        not unambiguous_entry_name?(name) -> {:halt, {:error, {:ambiguous_entry_name, name}}}
+        true -> {:cont, :ok}
+      end
+    end)
+  end
+
+  defp duplicates(names) do
+    names
+    |> Enum.reduce_while(MapSet.new(), fn name, seen ->
+      folded = String.downcase(name)
+
+      if MapSet.member?(seen, folded),
+        do: {:halt, {:duplicate, name}},
+        else: {:cont, MapSet.put(seen, folded)}
+    end)
+    |> case do
+      {:duplicate, name} -> {:error, {:duplicate_entry, name}}
+      _seen -> :ok
     end
   end
 
   @spec safe_entry_name?(String.t()) :: boolean()
+  defp safe_entry_name?(""), do: false
+
   defp safe_entry_name?(name) do
     not String.starts_with?(name, "/") and
       not String.contains?(name, "\\") and
-      not Enum.any?(Path.split(name), &(&1 == ".."))
+      name |> String.split("/") |> Enum.all?(&(&1 not in ["", ".", ".."]))
+  end
+
+  @spec unambiguous_entry_name?(String.t()) :: boolean()
+  defp unambiguous_entry_name?(name) do
+    String.valid?(name) and
+      not control_characters?(name) and
+      String.normalize(name, :nfc) == name
+  end
+
+  defp control_characters?(name) do
+    name
+    |> String.to_charlist()
+    |> Enum.any?(&(&1 < 0x20 or &1 == 0x7F))
   end
 end
