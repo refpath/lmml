@@ -56,7 +56,18 @@ defmodule Lmml.MixProject do
   defp package do
     [
       name: "lmml",
-      files: ~w(lib docs .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
+      files: ~w(
+        lib
+        docs/THE_LMML_MANIFESTO.md
+        docs/RFC_LMML_FORMAT.md
+        docs/LANGUAGE_REFERENCE.md
+        docs/SECURITY.md
+        .formatter.exs
+        mix.exs
+        README.md
+        LICENSE
+        CHANGELOG.md
+      ),
       licenses: ["MIT"],
       maintainers: ["Oeditus Team"],
       links: %{
