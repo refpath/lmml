@@ -43,6 +43,7 @@ defmodule Lmml.Bundle do
   """
 
   alias Lmml.Archive.Policy
+  alias Lmml.Archive.UnixTypes
   alias Lmml.Document
   alias Lmml.Embed
 
@@ -146,7 +147,7 @@ defmodule Lmml.Bundle do
 
   defp open_zip(name, content, policy) do
     with {:ok, table} <- read_table(content),
-         :ok <- validate_table(table, policy),
+         :ok <- validate_table(table, content, policy),
          {:ok, raw_entries} <- unzip(content),
          :ok <- validate_sizes(raw_entries, table),
          {:ok, narrative} <- fetch_narrative(raw_entries, name),
@@ -183,11 +184,12 @@ defmodule Lmml.Bundle do
   # Every check here runs against the central directory alone, *before*
   # `:zip.unzip/2` inflates a single entry: name safety, duplicate and
   # non-regular entries, then the resource policy.
-  defp validate_table(table, policy) do
+  defp validate_table(table, content, policy) do
     names = Enum.map(table, fn {name, _info, _csize} -> name end)
 
     with :ok <- validate_entry_names(names),
-         :ok <- validate_regular(table) do
+         :ok <- validate_regular(table),
+         :ok <- UnixTypes.check(content, table) do
       Policy.check_table(policy, Enum.map(table, &table_entry/1))
     end
   end
@@ -589,7 +591,12 @@ defmodule Lmml.Bundle do
   defp safe_entry_name?(name) do
     not String.starts_with?(name, "/") and
       not String.contains?(name, "\\") and
-      name |> String.split("/") |> Enum.all?(&(&1 not in ["", ".", ".."]))
+      Enum.all?(String.split(name, "/"), fn
+        "" -> false
+        "." -> false
+        ".." -> false
+        _ -> true
+      end)
   end
 
   @spec unambiguous_entry_name?(String.t()) :: boolean()

@@ -63,6 +63,7 @@ defmodule Lmml.Manifest do
   @type issue ::
           :no_manifest
           | :unversioned_manifest
+          | {:invalid_manifest, term()}
           | {:malformed_entries, term()}
           | {:malformed_entry, String.t()}
           | {:missing_entry, String.t()}
@@ -370,17 +371,17 @@ defmodule Lmml.Manifest do
   @doc "Same as `verify/1`, but against an explicitly supplied manifest instead of the bundle's own."
   @spec verify(Bundle.t(), t()) :: :ok | {:error, [issue(), ...]}
   def verify(%Bundle{} = bundle, %__MODULE__{} = manifest) do
-    case declared_version(manifest) do
-      nil ->
-        {:error, [:unversioned_manifest]}
+    with {:ok, _version} <- Map.fetch(manifest.data, "lmml_version"),
+         :ok <- check_version(manifest.data) do
+      issues =
+        entries_issues(bundle, manifest) ++
+          extensions_issues(manifest) ++
+          __MODULE__.ToolEvent.issues(manifest, bundle)
 
-      _version ->
-        issues =
-          entries_issues(bundle, manifest) ++
-            extensions_issues(manifest) ++
-            __MODULE__.ToolEvent.issues(manifest, bundle)
-
-        if issues == [], do: :ok, else: {:error, issues}
+      if issues == [], do: :ok, else: {:error, issues}
+    else
+      :error -> {:error, [:unversioned_manifest]}
+      {:error, reason} -> {:error, [{:invalid_manifest, reason}]}
     end
   end
 

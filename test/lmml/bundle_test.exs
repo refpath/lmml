@@ -185,7 +185,12 @@ defmodule Lmml.BundleTest do
 
     test "a zip bundle round-trips through write! and open, re-deriving the entry name from the target path",
          %{dir: dir} do
-      {:ok, bundle} = Bundle.new_zip("original-name", "See @a.png.", %{"a.png" => "bytes"})
+      {:ok, bundle} =
+        Bundle.new_zip("original-name", "See @a.png and @assets/b.png.", %{
+          "a.png" => "bytes",
+          "assets/b.png" => "nested bytes"
+        })
+
       path = Path.join(dir, "renamed.lmmlz")
 
       :ok = Bundle.write!(bundle, path)
@@ -193,6 +198,7 @@ defmodule Lmml.BundleTest do
 
       assert reopened.name == "renamed.lmml"
       assert {:ok, "bytes"} = Bundle.embed(reopened, "a.png")
+      assert {:ok, "nested bytes"} = Bundle.embed(reopened, "assets/b.png")
     end
   end
 
